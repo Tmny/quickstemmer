@@ -1,6 +1,37 @@
 local ctx = reaper.ImGui_CreateContext('Stem Export Tool')
 local visible = true
 
+-- Generic Track State Manager
+local TrackStateManager = {
+    savedStates = {}
+}
+
+function TrackStateManager:save(track, properties)
+    if not self.savedStates[track] then self.savedStates[track] = {} end
+
+    for _, prop in ipairs(properties) do
+        if prop:sub(1, 2) == "P_" then -- string property
+            local _, val = reaper.GetSetMediaTrackInfo_String(track, prop, "", false)
+            self.savedStates[track][prop] = val
+        else -- numeric property
+            self.savedStates[track][prop] = reaper.GetMediaTrackInfo_Value(track, prop)
+        end
+    end
+end
+
+function TrackStateManager:restore()
+    for track, props in pairs(self.savedStates) do
+        for prop, val in pairs(props) do
+            if prop:sub(1, 2) == "P_" then
+                reaper.GetSetMediaTrackInfo_String(track, prop, val, true)
+            else
+                reaper.SetMediaTrackInfo_Value(track, prop, val)
+            end
+        end
+    end
+end
+
+
 local function getDateTimeString()
     return os.date("%Y-%m-%d_%H-%M-%S")
 end
@@ -15,10 +46,11 @@ local function hasMediaItems(track)
     return false
 end
 
-local function prepareTracks(trackCount)
+local function prepareTracks(trackCount, includeMuted)
     local prefixLevels = { [0] = 1 }
     local currentDepth = 0
-    local originalNames = {}
+
+    TrackStateManager.savedStates = {} -- Clear old state
 
     for i = 0, trackCount - 1 do
         local track = reaper.GetTrack(0, i)
@@ -26,9 +58,16 @@ local function prepareTracks(trackCount)
         local isMuted = reaper.GetMediaTrackInfo_Value(track, "B_MUTE")
         local folderDepthChange = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
 
-        if isMuted == 0 and hasMediaItems(track) then
+        if (includeMuted or isMuted == 0) and hasMediaItems(track) then
             reaper.SetTrackSelected(track, true)
-            originalNames[track] = origName
+
+            -- Save current state
+            TrackStateManager:save(track, { "B_MUTE", "P_NAME" })
+
+            -- Temporarily unmute if needed
+            if isMuted == 1 then
+                reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
+            end
 
             local prefix = table.concat((function()
                 local parts = {}
@@ -58,9 +97,8 @@ local function prepareTracks(trackCount)
             prefixLevels[currentDepth] = prefixLevels[currentDepth] + 1
         end
     end
-
-    return originalNames
 end
+
 
 local function checkTracksSelected(trackCount)
     for i = 0, trackCount - 1 do
@@ -100,10 +138,8 @@ local function renderStems(stemsFolder)
     reaper.Main_OnCommand(42230, 0) -- Render quietly
 end
 
-local function restoreOriginalNames(originalNames)
-    for track, name in pairs(originalNames) do
-        reaper.GetSetMediaTrackInfo_String(track, "P_NAME", name, true)
-    end
+local function restoreOriginalNames()
+    TrackStateManager:restore()
 end
 
 local function getSortedStemFiles(folder)
@@ -164,7 +200,8 @@ local function importStemsWithNesting(folder, stemFiles)
     end
 end
 
-local function runStemExporter()
+--main function
+local function runStemExporter(includeMuted)
     reaper.Main_OnCommand(40026, 0) -- Save
     reaper.Main_OnCommand(40297, 0) -- Unselect all
 
@@ -177,7 +214,7 @@ local function runStemExporter()
     reaper.Undo_BeginBlock()
     reaper.PreventUIRefresh(1)
 
-    local originalNames = prepareTracks(trackCount)
+    local originalNames = prepareTracks(trackCount, includeMuted)
 
     if not checkTracksSelected(trackCount) then
         reaper.ShowMessageBox("No suitable tracks found.", "Error", 0)
