@@ -1,5 +1,6 @@
 local ctx = reaper.ImGui_CreateContext('Stem Export Tool')
 local visible = true
+local lastExportFolder = nil
 
 -- Generic Track State Manager
 local TrackStateManager = {
@@ -231,6 +232,8 @@ local function runStemExporter(includeMuted)
 
     local dateTime = getDateTimeString()
     local stemsFolder = projectDir .. "/Stems/" .. dateTime
+    lastExportFolder = stemsFolder
+
     os.execute('mkdir "' .. stemsFolder .. '"')
 
     renderStems(stemsFolder)
@@ -247,9 +250,36 @@ local function runStemExporter(includeMuted)
 end
 
 
---Filter
-local includeMuted = false -- default off
 
+--util
+local function openInExplorer(path)
+    local osName = reaper.GetOS()
+    if osName:match("Win") then
+        os.execute('start "" "' .. path .. '"')
+    elseif osName:match("OSX") then
+        os.execute('open "' .. path .. '"')
+    else -- Linux
+        os.execute('xdg-open "' .. path .. '"')
+    end
+end
+
+local function cleanUpStemFilenames(folder)
+    local p = io.popen('dir "' .. folder .. '" /b /a-d')
+    for file in p:lines() do
+        if file:match("%.wav$") then
+            local cleanName = file:gsub("^%d[%d%-]*[%s%-]+", ""):gsub("%.wav$", "")
+            if cleanName ~= file then
+                local oldPath = folder .. "/" .. file
+                local newPath = folder .. "/" .. cleanName .. ".wav"
+                os.rename(oldPath, newPath)
+            end
+        end
+    end
+    p:close()
+end
+
+--Filter in GUI
+local includeMuted = false -- default off
 
 -- GUI Loop
 function loop()
@@ -260,13 +290,24 @@ function loop()
     if rv then
         reaper.ImGui_Text(ctx, "Export stems with hierarchy:")
         _, includeMuted = reaper.ImGui_Checkbox(ctx, "Include muted tracks", includeMuted)
-        if reaper.ImGui_Button(ctx, 'Run Export') then
+        if reaper.ImGui_Button(ctx, 'Run Stem Export') then
             runStemExporter(includeMuted)
         end
+        if lastExportFolder then
+            if reaper.ImGui_Button(ctx, 'Open Stem Folder') then
+                openInExplorer(lastExportFolder)
+            end
+            if reaper.ImGui_Button(ctx, 'Remove Prefixes in last Stem Folder') then
+                cleanUpStemFilenames(lastExportFolder)
+            end
+        end
+        
         reaper.ImGui_End(ctx)
     end
     reaper.defer(loop)
 end
 
 reaper.defer(loop)
+
+
 
