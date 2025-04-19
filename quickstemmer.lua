@@ -1,6 +1,7 @@
 local ctx = reaper.ImGui_CreateContext('Stem Export Tool')
 local visible = true
 local lastExportFolder = nil
+local safeSeparator = "__"
 
 -- Generic Track State Manager
 local TrackStateManager = {
@@ -47,58 +48,114 @@ local function hasMediaItems(track)
     return false
 end
 
+-- Function: Prepares tracks by renaming them with structured numeric prefixes,
+--           managing folder depth, and unmuting/muting as needed.
+-- @param trackCount - total number of tracks in the project
+-- @param includeMuted - boolean flag to include muted tracks in the operation
 local function prepareTracks(trackCount, includeMuted)
-    local prefixLevels = { [0] = 1 }
+   
+    local prefixLevels = { [0] = 1 }  -- Keeps track of numbering at each depth level (e.g., [0] = 1, [1] = 2, etc.)
     local currentDepth = 0
+    local pendingFolderDepth = 0 -- Used to delay depth changes for skipped tracks (e.g., muted folders)
 
-    TrackStateManager.savedStates = {} -- Clear old state
+    TrackStateManager.savedStates = {} -- Clear any previously saved track states
+
+    -- Debugging: mark start of the loop
+    reaper.ShowConsoleMsg("Starting for loop ---------------\n")
 
     for i = 0, trackCount - 1 do
         local track = reaper.GetTrack(0, i)
         local _, origName = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
         local isMuted = reaper.GetMediaTrackInfo_Value(track, "B_MUTE")
+        local includeThisTrack = includeMuted or isMuted == 0
+        
+        -- Get folder depth change: 
+        --  1 = folder start, 
+        --  0 = normal track, 
+        -- -1 or less = folder end(s)
         local folderDepthChange = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
 
-        if (includeMuted or isMuted == 0) and hasMediaItems(track) then
+        reaper.ShowConsoleMsg("Current track: " .. origName .. " - ")
+        if isMuted == 1 then reaper.ShowConsoleMsg("muted - skipping") end
+
+        -- Apply any pending folder depth changes delayed from previous muted/skipped tracks
+        if pendingFolderDepth ~= 0 then
+            currentDepth = math.max(0, currentDepth + pendingFolderDepth)
+
+            -- Clean up any deeper levels after current
+            for d = currentDepth + 1, #prefixLevels do
+                prefixLevels[d] = nil
+            end
+            if pendingFolderChange then reaper.ShowConsoleMsg("pending folderchange applied: " .. pendingFolderChange .. " - ") end
+            pendingFolderDepth = 0
+        end
+
+        -- If track is valid and contains media items, process it
+        if includeThisTrack and hasMediaItems(track) then
+            -- Select the track in REAPER
             reaper.SetTrackSelected(track, true)
 
-            -- Save current state
+            -- Save mute and name state so it can be restored later
             TrackStateManager:save(track, { "B_MUTE", "P_NAME" })
 
-            -- Temporarily unmute if needed
+            -- Unmute if temporarily needed
             if isMuted == 1 then
                 reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
             end
 
+            reaper.ShowConsoleMsg("building prefix: ")
+            -- Build prefix based on current folder depth and level counters
             local prefix = table.concat((function()
                 local parts = {}
                 for d = 0, currentDepth do
-                    table.insert(parts, string.format("%02d", prefixLevels[d]))
+                    reaper.ShowConsoleMsg("current depth: " .. currentDepth .. " prefix: " .. 
+                    string.format("%02d", prefixLevels[d] or 1) .. " | ")
+                    -- Format each level as 2-digit (e.g., 01, 02)
+                    table.insert(parts, string.format("%02d", prefixLevels[d] or 1))
                 end
                 return parts
             end)(), "-")
 
-            reaper.GetSetMediaTrackInfo_String(track, "P_NAME", prefix .. " " .. origName, true)
+            -- Set the new track name: prefix + original name
+            reaper.GetSetMediaTrackInfo_String(track, "P_NAME", prefix .. safeSeparator .. origName, true)
 
+            -- Clean up deeper level prefixes in case of nesting changes
             for d = currentDepth + 1, #prefixLevels do
                 prefixLevels[d] = nil
             end
         end
 
-        if folderDepthChange == 1 then
-            currentDepth = currentDepth + 1
-            prefixLevels[currentDepth] = 1
-        elseif folderDepthChange < 0 then
-            for d = currentDepth - folderDepthChange, #prefixLevels do
-                prefixLevels[d] = nil
+        -- Handle folder nesting changes for current track
+        if includeThisTrack then
+            if folderDepthChange == 1 then
+                -- Start of folder: go deeper
+                currentDepth = currentDepth + 1
+                prefixLevels[currentDepth] = 1
+
+            elseif folderDepthChange < 0 then
+                -- End of folder(s): go back up
+                for d = currentDepth - folderDepthChange, #prefixLevels do
+                    prefixLevels[d] = nil
+                end
+
+                currentDepth = currentDepth - math.abs(folderDepthChange)
+                prefixLevels[currentDepth] = (prefixLevels[currentDepth] or 0) + 1
+
+            elseif folderDepthChange == 0 then
+                -- Same level: increment current depth's counter
+                prefixLevels[currentDepth] = (prefixLevels[currentDepth] or 0) + 1
             end
-            currentDepth = currentDepth - math.abs(folderDepthChange)
-            prefixLevels[currentDepth] = (prefixLevels[currentDepth] or 0) + 1
-        elseif folderDepthChange == 0 then
-            prefixLevels[currentDepth] = prefixLevels[currentDepth] + 1
+        else
+            -- Track is excluded (e.g., muted), so defer folder depth change
+            pendingFolderDepth = pendingFolderDepth + folderDepthChange
         end
+         reaper.ShowConsoleMsg("\n")
     end
+
+    -- Debugging: mark end of the loop
+    reaper.ShowConsoleMsg("Ending for loop ---------------\n")
 end
+
 
 
 local function checkTracksSelected(trackCount)
@@ -166,43 +223,73 @@ end
 
 local function importStemsWithNesting(folder, stemFiles)
     local depthStack = {}
+    local prevPrefix = ""
     local prevDepth = 0
+
+    reaper.ShowConsoleMsg("----- Importing stems with nesting -----\n")
 
     for i, file in ipairs(stemFiles) do
         local path = folder .. "/" .. file
-        local prefix = file:match("^(%d[%d%-]*)[%s%-]")
+        local prefix = file:match("^(%d[%d%-]*)__")
         local depth = 0
-        if prefix then for _ in prefix:gmatch("%d+") do depth = depth + 1 end end
+        if prefix then
+            for _ in prefix:gmatch("%d+") do depth = depth + 1 end
+        end
 
+        reaper.ShowConsoleMsg(string.format("\n[%d] File: %s\n", i, file))
+        reaper.ShowConsoleMsg("Prefix: " .. tostring(prefix) .. "\n")
+        reaper.ShowConsoleMsg("Calculated Depth: " .. tostring(depth) .. "\n")
+
+        -- Create track
         reaper.Main_OnCommand(40297, 0)
         reaper.InsertTrackAtIndex(reaper.CountTracks(0), true)
         local idx = reaper.CountTracks(0) - 1
         local track = reaper.GetTrack(0, idx)
 
-        local name = file:match("^%d[%d%-]*[%- ]+(.+)%..+$") or file:gsub("%.wav$", "")
+        local name = file:match("^%d[%d%-]*__%s*(.+)%..+$") or file:gsub("%.wav$", "")
         reaper.GetSetMediaTrackInfo_String(track, "P_NAME", name, true)
 
         reaper.SetEditCurPos(0, false, false)
         reaper.SetOnlyTrackSelected(track)
         reaper.InsertMedia(path, 0)
 
+        -- Logic to validate nesting
+        local function isValidChild(childPrefix, parentPrefix)
+            return parentPrefix ~= "" and childPrefix:sub(1, #parentPrefix) == parentPrefix
+        end
+
         if i > 1 then
-            if depth > prevDepth then
+            if depth > prevDepth and isValidChild(prefix, prevPrefix) then
+                -- Valid nesting under previous track
                 local lastTrack = reaper.GetTrack(0, idx - 1)
                 reaper.SetMediaTrackInfo_Value(lastTrack, "I_FOLDERDEPTH", 1)
                 reaper.SetMediaTrackInfo_Value(track, "I_FOLDERDEPTH", 0)
                 table.insert(depthStack, lastTrack)
+                reaper.ShowConsoleMsg("↑ Increased depth & valid prefix match: Set folder start\n")
             elseif depth < prevDepth then
                 local lastTrack = reaper.GetTrack(0, idx - 1)
-                reaper.SetMediaTrackInfo_Value(lastTrack, "I_FOLDERDEPTH", depth - prevDepth)
+                local folderDepthChange = depth - prevDepth
+                reaper.SetMediaTrackInfo_Value(lastTrack, "I_FOLDERDEPTH", folderDepthChange)
+                reaper.ShowConsoleMsg("↓ Decreased depth: Set folder close depth " .. folderDepthChange .. "\n")
+            else
+                reaper.ShowConsoleMsg("→ Same depth or invalid nesting: no folder structure change\n")
             end
+        else
+            reaper.ShowConsoleMsg("First track, no nesting applied\n")
         end
+
         prevDepth = depth
+        prevPrefix = prefix or ""
     end
+
+    reaper.ShowConsoleMsg("----- Done importing stems -----\n")
 end
+
+
 
 --main function
 local function runStemExporter(includeMuted)
+    reaper.ClearConsole()
     reaper.Main_OnCommand(40026, 0) -- Save
     reaper.Main_OnCommand(40297, 0) -- Unselect all
 
@@ -267,7 +354,7 @@ local function cleanUpStemFilenames(folder)
     local p = io.popen('dir "' .. folder .. '" /b /a-d')
     for file in p:lines() do
         if file:match("%.wav$") then
-            local cleanName = file:gsub("^%d[%d%-]*[%s%-]+", ""):gsub("%.wav$", "")
+            local cleanName = file:gsub("^%d[%d%-]*__%s*", ""):gsub("%.wav$", "")
             if cleanName ~= file then
                 local oldPath = folder .. "/" .. file
                 local newPath = folder .. "/" .. cleanName .. ".wav"
@@ -281,33 +368,64 @@ end
 --Filter in GUI
 local includeMuted = false -- default off
 
+local fontBold = reaper.ImGui_CreateFont("sans-serif", 16, reaper.ImGui_FontFlags_Bold())
+reaper.ImGui_Attach(ctx, fontBold)
+        
 -- GUI Loop
 function loop()
     if not visible then return end
-    reaper.ImGui_SetNextWindowSize(ctx, 300, 150, reaper.ImGui_Cond_FirstUseEver())
+    reaper.ImGui_SetNextWindowSize(ctx, 500, 300, reaper.ImGui_Cond_FirstUseEver())
     local rv
-    rv, visible = reaper.ImGui_Begin(ctx, "Quickstem", true)
+    rv, visible = reaper.ImGui_Begin(ctx, "Quickstemmer", true)
     if rv then
-        reaper.ImGui_Text(ctx, "Export stems with hierarchy:")
-        _, includeMuted = reaper.ImGui_Checkbox(ctx, "Include muted tracks", includeMuted)
-        if reaper.ImGui_Button(ctx, 'Run Stem Export') then
+        
+ 
+        reaper.ImGui_PushFont(ctx, fontBold)
+        reaper.ImGui_Text(ctx, "Include:")
+        reaper.ImGui_PopFont(ctx)
+        
+        
+        _, includeMuted = reaper.ImGui_Checkbox(ctx, "muted tracks", includeMuted)
+        if reaper.ImGui_Button(ctx, 'RUN') then
             runStemExporter(includeMuted)
         end
-        if lastExportFolder then
-            if reaper.ImGui_Button(ctx, 'Open Stem Folder') then
+        reaper.ImGui_Dummy(ctx, 0, 10)  -- width = 0, height = 10 pixels
+
+
+
+        -- Display the last export path with an editable text input field
+        reaper.ImGui_Text(ctx, "Last Export Path:")
+        local pathBuffer = lastExportFolder or ""
+        _, pathBuffer = reaper.ImGui_InputText(ctx, "##ExportPath", pathBuffer, 200)
+        lastExportFolder = pathBuffer  -- Update the variable with the edited text
+
+        -- Show buttons only if path is valid
+        local function folderExists(path)
+            local info = reaper.EnumerateFiles(path, 0) or reaper.EnumerateSubdirectories(path, 0)
+            return info ~= nil
+        end
+
+
+        if lastExportFolder and lastExportFolder ~= "" and folderExists(lastExportFolder) then
+            if reaper.ImGui_Button(ctx, "Open") then
                 openInExplorer(lastExportFolder)
             end
-            if reaper.ImGui_Button(ctx, 'Remove Prefixes in last Stem Folder') then
+
+            reaper.ImGui_SameLine(ctx)
+
+            if reaper.ImGui_Button(ctx, "Remove Prefixes in last Stem Folder") then
                 cleanUpStemFilenames(lastExportFolder)
             end
         end
-        
+
         reaper.ImGui_End(ctx)
     end
     reaper.defer(loop)
 end
 
+
 reaper.defer(loop)
+
 
 
 
