@@ -208,18 +208,38 @@ local function getSortedStemFiles(folder)
     end
     p:close()
 
+    -- Sort files based on their prefix depth to ensure correct nesting
     table.sort(files, function(a, b)
-        local aparts = { a:match("^(%d+)-?(%d*)-?(%d*)") }
-        local bparts = { b:match("^(%d+)-?(%d*)-?(%d*)") }
-        for i = 1, 3 do
+        -- Split prefixes into parts, e.g., "04-01-01" becomes {"04", "01", "01"}
+        local aparts = { a:match("^(%d+[%d%-]*)(__.*)$") }
+        local bparts = { b:match("^(%d+[%d%-]*)(__.*)$") }
+        
+        -- If no prefix found, handle it as a zero-length part (to avoid errors)
+        aparts = aparts[1] and aparts[1]:split('-') or {}
+        bparts = bparts[1] and bparts[1]:split('-') or {}
+
+        -- Compare prefix parts (segments)
+        for i = 1, math.min(#aparts, #bparts) do
             local anum, bnum = tonumber(aparts[i]) or 0, tonumber(bparts[i]) or 0
             if anum ~= bnum then return anum < bnum end
         end
-        return a < b
+
+        -- If all segments are equal, the shorter one should come first (for deeper prefixes)
+        return #aparts < #bparts
     end)
 
     return files
 end
+
+-- Adding a split helper function to properly break down prefixes into parts
+function string.split(s, delimiter)
+    local result = {}
+    for match in (s..delimiter):gmatch("(.-)"..delimiter) do
+        table.insert(result, match)
+    end
+    return result
+end
+
 
 local function importStemsWithNesting(folder, stemFiles)
     local depthStack = {}
