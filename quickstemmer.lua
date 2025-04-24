@@ -3,11 +3,20 @@ local visible = true
 local lastExportFolder = nil
 local safeSeparator = "__"
 
--- Track Manager centralized handling
-local TrackStateManager = {
-    savedStates = {}
-}
+--==============================================================
+--###################### UTILITY FUNCTIONS #####################
+--==============================================================
 
+-- Splits strings by a delimiter
+function string.split(s, delimiter)
+    local result = {}
+    for match in (s..delimiter):gmatch("(.-)"..delimiter) do
+        table.insert(result, match)
+    end
+    return result
+end
+
+-- Check if a track has media items
 local function hasMediaItems(track)
     for i = 0, reaper.CountTrackMediaItems(track) - 1 do
         local item = reaper.GetTrackMediaItem(track, i)
@@ -17,6 +26,76 @@ local function hasMediaItems(track)
     end
     return false
 end
+
+-- Returns the current date and time as a string
+local function getDateTimeString()
+    return os.date("%Y-%m-%d_%H-%M-%S")
+end
+
+-- Checks if any track is selected
+local function checkTracksSelected(trackCount)
+    for i = 0, trackCount - 1 do
+        local track = reaper.GetTrack(0, i)
+        if reaper.IsTrackSelected(track) then return true end
+    end
+    return false
+end
+
+-- Gets the directory of the current project
+local function getProjectDirectory()
+    local _, projPathWithName = reaper.EnumProjects(-1, "")
+    return projPathWithName:match("^(.*)[\\/][^\\/]-%.rpp$")
+end
+
+-- Finds the maximum end time across all media items
+local function getMaxEndTime()
+    local maxEnd = 0
+    for i = 0, reaper.CountTracks(0) - 1 do
+        local track = reaper.GetTrack(0, i)
+        for j = 0, reaper.CountTrackMediaItems(track) - 1 do
+            local item = reaper.GetTrackMediaItem(track, j)
+            local endTime = reaper.GetMediaItemInfo_Value(item, "D_POSITION") + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+            maxEnd = math.max(maxEnd, endTime)
+        end
+    end
+    return maxEnd
+end
+
+-- Opens a given path in the file explorer
+local function openInExplorer(path)
+    local osName = reaper.GetOS()
+    if osName:match("Win") then
+        os.execute('start "" "' .. path .. '"')
+    elseif osName:match("OSX") then
+        os.execute('open "' .. path .. '"')
+    else -- Linux
+        os.execute('xdg-open "' .. path .. '"')
+    end
+end
+
+-- Removes prefixes from stem filenames
+local function cleanUpStemFilenames(folder)
+    local p = io.popen('dir "' .. folder .. '" /b /a-d')
+    for file in p:lines() do
+        if file:match("%.wav$") then
+            local cleanName = file:gsub("^%d[%d%-]*__%s*", ""):gsub("%.wav$", "")
+            if cleanName ~= file then
+                local oldPath = folder .. "/" .. file
+                local newPath = folder .. "/" .. cleanName .. ".wav"
+                os.rename(oldPath, newPath)
+            end
+        end
+    end
+    p:close()
+end
+
+--==============================================================
+--##################### TRACK STATE MANAGER ####################
+--==============================================================
+
+local TrackStateManager = {
+    savedStates = {}
+}
 
 function TrackStateManager:save(track, properties)
     if not self.savedStates[track] then self.savedStates[track] = {} end
@@ -42,7 +121,9 @@ function TrackStateManager:restore()
     end
 end
 
-function TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator)
+function TrackStateManager.prepareTracks(self, trackCount, includeMuted, safeSeparator)
+    reaper.ShowConsoleMsg("includeMuted (actual value): " .. tostring(includeMuted) .. "\n")
+
     local prefixLevels = { [0] = 1 }
     local currentDepth = 0
     local pendingFolderDepth = 0
@@ -57,8 +138,8 @@ function TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator
         local includeThisTrack = includeMuted or isMuted == 0
         local folderDepthChange = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
 
-        reaper.ShowConsoleMsg("Current track: " .. origName .. " - ")
-        if isMuted == 1 then reaper.ShowConsoleMsg("muted - skipping") end
+        reaper.ShowConsoleMsg("Track: " .. origName .. ", Include: " .. tostring(includeThisTrack) .. ", Has Media Items: " .. tostring(hasMediaItems(track)) .. "\n")
+
 
         if pendingFolderDepth ~= 0 then
             currentDepth = math.max(0, currentDepth + pendingFolderDepth)
@@ -75,12 +156,9 @@ function TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator
                 reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
             end
 
-            reaper.ShowConsoleMsg("building prefix: ")
             local prefix = table.concat((function()
                 local parts = {}
                 for d = 0, currentDepth do
-                    reaper.ShowConsoleMsg("current depth: " .. currentDepth .. " prefix: " ..
-                        string.format("%02d", prefixLevels[d] or 1) .. " | ")
                     table.insert(parts, string.format("%02d", prefixLevels[d] or 1))
                 end
                 return parts
@@ -108,50 +186,14 @@ function TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator
         else
             pendingFolderDepth = pendingFolderDepth + folderDepthChange
         end
-
-        reaper.ShowConsoleMsg("\n")
     end
 
     reaper.ShowConsoleMsg("Ending for loop ---------------\n")
 end
 
-
-
-local function getDateTimeString()
-    return os.date("%Y-%m-%d_%H-%M-%S")
-end
-
-
-
-
-
-
-
-local function checkTracksSelected(trackCount)
-    for i = 0, trackCount - 1 do
-        local track = reaper.GetTrack(0, i)
-        if reaper.IsTrackSelected(track) then return true end
-    end
-    return false
-end
-
-local function getProjectDirectory()
-    local _, projPathWithName = reaper.EnumProjects(-1, "")
-    return projPathWithName:match("^(.*)[\\/][^\\/]-%.rpp$")
-end
-
-local function getMaxEndTime()
-    local maxEnd = 0
-    for i = 0, reaper.CountTracks(0) - 1 do
-        local track = reaper.GetTrack(0, i)
-        for j = 0, reaper.CountTrackMediaItems(track) - 1 do
-            local item = reaper.GetTrackMediaItem(track, j)
-            local endTime = reaper.GetMediaItemInfo_Value(item, "D_POSITION") + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
-            maxEnd = math.max(maxEnd, endTime)
-        end
-    end
-    return maxEnd
-end
+--==============================================================
+--##################### STEM EXPORT FUNCTIONS ##################
+--==============================================================
 
 local function renderStems(stemsFolder)
     local maxEndTime = getMaxEndTime()
@@ -165,10 +207,6 @@ local function renderStems(stemsFolder)
     reaper.Main_OnCommand(42230, 0) -- Render quietly
 end
 
-local function restoreOriginalNames()
-    TrackStateManager:restore()
-end
-
 local function getSortedStemFiles(folder)
     local p = io.popen('dir "' .. folder .. '" /b /a-d')
     local files = {}
@@ -177,38 +215,22 @@ local function getSortedStemFiles(folder)
     end
     p:close()
 
-    -- Sort files based on their prefix depth to ensure correct nesting
     table.sort(files, function(a, b)
-        -- Split prefixes into parts, e.g., "04-01-01" becomes {"04", "01", "01"}
         local aparts = { a:match("^(%d+[%d%-]*)(__.*)$") }
         local bparts = { b:match("^(%d+[%d%-]*)(__.*)$") }
-        
-        -- If no prefix found, handle it as a zero-length part (to avoid errors)
+
         aparts = aparts[1] and aparts[1]:split('-') or {}
         bparts = bparts[1] and bparts[1]:split('-') or {}
 
-        -- Compare prefix parts (segments)
         for i = 1, math.min(#aparts, #bparts) do
             local anum, bnum = tonumber(aparts[i]) or 0, tonumber(bparts[i]) or 0
             if anum ~= bnum then return anum < bnum end
         end
-
-        -- If all segments are equal, the shorter one should come first (for deeper prefixes)
         return #aparts < #bparts
     end)
 
     return files
 end
-
--- Adding a split helper function to properly break down prefixes into parts
-function string.split(s, delimiter)
-    local result = {}
-    for match in (s..delimiter):gmatch("(.-)"..delimiter) do
-        table.insert(result, match)
-    end
-    return result
-end
-
 
 local function importStemsWithNesting(folder, stemFiles)
     local depthStack = {}
@@ -274,9 +296,10 @@ local function importStemsWithNesting(folder, stemFiles)
     reaper.ShowConsoleMsg("----- Done importing stems -----\n")
 end
 
+--==============================================================
+--########################## MAIN ##############################
+--==============================================================
 
-
---main function
 local function runStemExporter(includeMuted)
     reaper.ClearConsole()
     reaper.Main_OnCommand(40026, 0) -- Save
@@ -325,42 +348,16 @@ local function runStemExporter(includeMuted)
 end
 
 
-
-
---util
-local function openInExplorer(path)
-    local osName = reaper.GetOS()
-    if osName:match("Win") then
-        os.execute('start "" "' .. path .. '"')
-    elseif osName:match("OSX") then
-        os.execute('open "' .. path .. '"')
-    else -- Linux
-        os.execute('xdg-open "' .. path .. '"')
-    end
-end
-
-local function cleanUpStemFilenames(folder)
-    local p = io.popen('dir "' .. folder .. '" /b /a-d')
-    for file in p:lines() do
-        if file:match("%.wav$") then
-            local cleanName = file:gsub("^%d[%d%-]*__%s*", ""):gsub("%.wav$", "")
-            if cleanName ~= file then
-                local oldPath = folder .. "/" .. file
-                local newPath = folder .. "/" .. cleanName .. ".wav"
-                os.rename(oldPath, newPath)
-            end
-        end
-    end
-    p:close()
-end
-
 --Filter in GUI
 local includeMuted = false -- default off
 
 local fontBold = reaper.ImGui_CreateFont("sans-serif", 16, reaper.ImGui_FontFlags_Bold())
 reaper.ImGui_Attach(ctx, fontBold)
         
--- GUI Loop
+
+--==============================================================
+--########################## GUI ###############################
+--==============================================================
 function loop()
     if not visible then return end
     reaper.ImGui_SetNextWindowSize(ctx, 500, 300, reaper.ImGui_Cond_FirstUseEver())
