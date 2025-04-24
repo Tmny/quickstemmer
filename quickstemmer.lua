@@ -3,19 +3,28 @@ local visible = true
 local lastExportFolder = nil
 local safeSeparator = "__"
 
--- Generic Track State Manager
+-- Track Manager centralized handling
 local TrackStateManager = {
     savedStates = {}
 }
 
+local function hasMediaItems(track)
+    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+        local item = reaper.GetTrackMediaItem(track, i)
+        if reaper.GetMediaItemInfo_Value(item, "D_LENGTH") > 0 then
+            return true
+        end
+    end
+    return false
+end
+
 function TrackStateManager:save(track, properties)
     if not self.savedStates[track] then self.savedStates[track] = {} end
-
     for _, prop in ipairs(properties) do
-        if prop:sub(1, 2) == "P_" then -- string property
+        if prop:sub(1, 2) == "P_" then
             local _, val = reaper.GetSetMediaTrackInfo_String(track, prop, "", false)
             self.savedStates[track][prop] = val
-        else -- numeric property
+        else
             self.savedStates[track][prop] = reaper.GetMediaTrackInfo_Value(track, prop)
         end
     end
@@ -33,34 +42,12 @@ function TrackStateManager:restore()
     end
 end
 
-
-local function getDateTimeString()
-    return os.date("%Y-%m-%d_%H-%M-%S")
-end
-
-local function hasMediaItems(track)
-    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
-        local item = reaper.GetTrackMediaItem(track, i)
-        if reaper.GetMediaItemInfo_Value(item, "D_LENGTH") > 0 then
-            return true
-        end
-    end
-    return false
-end
-
--- Function: Prepares tracks by renaming them with structured numeric prefixes,
---           managing folder depth, and unmuting/muting as needed.
--- @param trackCount - total number of tracks in the project
--- @param includeMuted - boolean flag to include muted tracks in the operation
-local function prepareTracks(trackCount, includeMuted)
-   
-    local prefixLevels = { [0] = 1 }  -- Keeps track of numbering at each depth level (e.g., [0] = 1, [1] = 2, etc.)
+function TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator)
+    local prefixLevels = { [0] = 1 }
     local currentDepth = 0
-    local pendingFolderDepth = 0 -- Used to delay depth changes for skipped tracks (e.g., muted folders)
+    local pendingFolderDepth = 0
+    self.savedStates = {}
 
-    TrackStateManager.savedStates = {} -- Clear any previously saved track states
-
-    -- Debugging: mark start of the loop
     reaper.ShowConsoleMsg("Starting for loop ---------------\n")
 
     for i = 0, trackCount - 1 do
@@ -68,93 +55,75 @@ local function prepareTracks(trackCount, includeMuted)
         local _, origName = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
         local isMuted = reaper.GetMediaTrackInfo_Value(track, "B_MUTE")
         local includeThisTrack = includeMuted or isMuted == 0
-        
-        -- Get folder depth change: 
-        --  1 = folder start, 
-        --  0 = normal track, 
-        -- -1 or less = folder end(s)
         local folderDepthChange = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
 
         reaper.ShowConsoleMsg("Current track: " .. origName .. " - ")
         if isMuted == 1 then reaper.ShowConsoleMsg("muted - skipping") end
 
-        -- Apply any pending folder depth changes delayed from previous muted/skipped tracks
         if pendingFolderDepth ~= 0 then
             currentDepth = math.max(0, currentDepth + pendingFolderDepth)
-
-            -- Clean up any deeper levels after current
             for d = currentDepth + 1, #prefixLevels do
                 prefixLevels[d] = nil
             end
-            if pendingFolderChange then reaper.ShowConsoleMsg("pending folderchange applied: " .. pendingFolderChange .. " - ") end
             pendingFolderDepth = 0
         end
 
-        -- If track is valid and contains media items, process it
         if includeThisTrack and hasMediaItems(track) then
-            -- Select the track in REAPER
             reaper.SetTrackSelected(track, true)
-
-            -- Save mute and name state so it can be restored later
-            TrackStateManager:save(track, { "B_MUTE", "P_NAME" })
-
-            -- Unmute if temporarily needed
+            self:save(track, { "B_MUTE", "P_NAME" })
             if isMuted == 1 then
                 reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
             end
 
             reaper.ShowConsoleMsg("building prefix: ")
-            -- Build prefix based on current folder depth and level counters
             local prefix = table.concat((function()
                 local parts = {}
                 for d = 0, currentDepth do
-                    reaper.ShowConsoleMsg("current depth: " .. currentDepth .. " prefix: " .. 
-                    string.format("%02d", prefixLevels[d] or 1) .. " | ")
-                    -- Format each level as 2-digit (e.g., 01, 02)
+                    reaper.ShowConsoleMsg("current depth: " .. currentDepth .. " prefix: " ..
+                        string.format("%02d", prefixLevels[d] or 1) .. " | ")
                     table.insert(parts, string.format("%02d", prefixLevels[d] or 1))
                 end
                 return parts
             end)(), "-")
 
-            -- Set the new track name: prefix + original name
             reaper.GetSetMediaTrackInfo_String(track, "P_NAME", prefix .. safeSeparator .. origName, true)
-
-            -- Clean up deeper level prefixes in case of nesting changes
             for d = currentDepth + 1, #prefixLevels do
                 prefixLevels[d] = nil
             end
         end
 
-        -- Handle folder nesting changes for current track
         if includeThisTrack then
             if folderDepthChange == 1 then
-                -- Start of folder: go deeper
                 currentDepth = currentDepth + 1
                 prefixLevels[currentDepth] = 1
-
             elseif folderDepthChange < 0 then
-                -- End of folder(s): go back up
                 for d = currentDepth - folderDepthChange, #prefixLevels do
                     prefixLevels[d] = nil
                 end
-
                 currentDepth = currentDepth - math.abs(folderDepthChange)
                 prefixLevels[currentDepth] = (prefixLevels[currentDepth] or 0) + 1
-
             elseif folderDepthChange == 0 then
-                -- Same level: increment current depth's counter
                 prefixLevels[currentDepth] = (prefixLevels[currentDepth] or 0) + 1
             end
         else
-            -- Track is excluded (e.g., muted), so defer folder depth change
             pendingFolderDepth = pendingFolderDepth + folderDepthChange
         end
-         reaper.ShowConsoleMsg("\n")
+
+        reaper.ShowConsoleMsg("\n")
     end
 
-    -- Debugging: mark end of the loop
     reaper.ShowConsoleMsg("Ending for loop ---------------\n")
 end
+
+
+
+local function getDateTimeString()
+    return os.date("%Y-%m-%d_%H-%M-%S")
+end
+
+
+
+
 
 
 
@@ -322,7 +291,7 @@ local function runStemExporter(includeMuted)
     reaper.Undo_BeginBlock()
     reaper.PreventUIRefresh(1)
 
-    local originalNames = prepareTracks(trackCount, includeMuted)
+    TrackStateManager:prepareTracks(trackCount, includeMuted, safeSeparator)
 
     if not checkTracksSelected(trackCount) then
         reaper.ShowMessageBox("No suitable tracks found.", "Error", 0)
@@ -344,7 +313,7 @@ local function runStemExporter(includeMuted)
     os.execute('mkdir "' .. stemsFolder .. '"')
 
     renderStems(stemsFolder)
-    restoreOriginalNames(originalNames)
+    TrackStateManager:restore()
 
     reaper.Main_OnCommand(40859, 0) -- New project
 
@@ -353,8 +322,8 @@ local function runStemExporter(includeMuted)
 
     reaper.PreventUIRefresh(-1)
     reaper.Undo_EndBlock("Stem Export", -1)
-    --reaper.ShowConsoleMsg("✅ Stems imported into new project with hierarchy.\n")
 end
+
 
 
 
