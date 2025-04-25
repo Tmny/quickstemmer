@@ -28,6 +28,14 @@ local function hasMediaItems(track)
     return false
 end
 
+-- Check if a track is fed audio from another track
+local function isRouted(track)
+    local numSends = reaper.GetTrackNumSends(track, 0) -- 0 = sends
+    local numReceives = reaper.GetTrackNumSends(track, -1) -- -1 = receives
+    return numSends > 0 or numReceives > 0
+end
+
+
 -- Returns the current date and time as a string
 local function getDateTimeString()
     return os.date("%Y-%m-%d_%H-%M-%S")
@@ -160,7 +168,7 @@ function TrackStateManager.prepareTracks(self, trackCount, includeMuted, safeSep
             pendingFolderDepth = 0
         end
 
-        if includeThisTrack and hasMediaItems(track) then
+        if includeThisTrack and (hasMediaItems(track) or isRouted(track) or folderDepthChange ~= 0) then
             reaper.SetTrackSelected(track, true)
             self:save(track, { "B_MUTE", "P_NAME", "I_FOLDERDEPTH" })
             if isMuted == 1 then
@@ -389,15 +397,10 @@ function loop()
         reaper.ImGui_Text(ctx, "Include:")
         reaper.ImGui_PopFont(ctx)
         _, includeMuted = reaper.ImGui_Checkbox(ctx, "Muted Tracks", includeMuted)
-
+        
         -- Start second column (Other configurations)
         reaper.ImGui_SameLine(ctx, columnWidth)  -- Move to the same line at columnWidth distance
         
-        -- Add "Configuration" Heading
-        reaper.ImGui_PushFont(ctx, fontBold)
-        reaper.ImGui_Text(ctx, "Configuration")
-        reaper.ImGui_PopFont(ctx)
-
         -- Sum to Bus Checkbox
         _, sumToBus = reaper.ImGui_Checkbox(ctx, "Sum to Bus", sumToBus)
 
@@ -440,7 +443,6 @@ function loop()
 
     reaper.defer(loop)
 end
-
 
 
 
