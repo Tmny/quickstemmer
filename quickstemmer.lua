@@ -3,6 +3,7 @@ local visible = true
 local lastExportFolder = nil
 local safeSeparator = "__"
 
+
 --==============================================================
 --###################### UTILITY FUNCTIONS #####################
 --==============================================================
@@ -310,7 +311,7 @@ end
 --########################## MAIN ##############################
 --==============================================================
 
-local function runStemExporter(includeMuted)
+local function runStemExporter(includeMuted, sumToBus)
     reaper.ClearConsole()
     reaper.Main_OnCommand(40026, 0) -- Save
     reaper.Main_OnCommand(40297, 0) -- Unselect all
@@ -345,7 +346,11 @@ local function runStemExporter(includeMuted)
 
     os.execute('mkdir "' .. stemsFolder .. '"')
 
-    TrackStateManager:flattenHierarchy(trackCount)
+    -- Conditionally flatten or keep bus based on the "Sum to Bus" filter
+    reaper.ShowConsoleMsg("\nsumToBus: " .. tostring(sumToBus) .. "\n")
+    if not sumToBus then
+        TrackStateManager:flattenHierarchy(trackCount)
+    end
     renderStems(stemsFolder)
     TrackStateManager:restore()
 
@@ -359,37 +364,53 @@ local function runStemExporter(includeMuted)
 end
 
 
---Filter in GUI
-local includeMuted = false -- default off
-
-local fontBold = reaper.ImGui_CreateFont("sans-serif", 16, reaper.ImGui_FontFlags_Bold())
-reaper.ImGui_Attach(ctx, fontBold)
-        
 
 --==============================================================
 --########################## GUI ###############################
 --==============================================================
+-- Filter in GUI
+local includeMuted = false -- default off
+local sumToBus = false -- default off for Sum to Bus
+
+
+-- GUI Loop
 function loop()
     if not visible then return end
     reaper.ImGui_SetNextWindowSize(ctx, 500, 300, reaper.ImGui_Cond_FirstUseEver())
     local rv
     rv, visible = reaper.ImGui_Begin(ctx, "Quickstemmer", true)
     if rv then
-        
- 
+        -- Column 1 Width
+        local columnWidth = 200
+
+        -- Start creating the two columns layout manually
+        -- Column 1 (Include checkboxes)
         reaper.ImGui_PushFont(ctx, fontBold)
         reaper.ImGui_Text(ctx, "Include:")
         reaper.ImGui_PopFont(ctx)
+        _, includeMuted = reaper.ImGui_Checkbox(ctx, "Muted Tracks", includeMuted)
+
+        -- Start second column (Other configurations)
+        reaper.ImGui_SameLine(ctx, columnWidth)  -- Move to the same line at columnWidth distance
         
-        
-        _, includeMuted = reaper.ImGui_Checkbox(ctx, "muted tracks", includeMuted)
+        -- Add "Configuration" Heading
+        reaper.ImGui_PushFont(ctx, fontBold)
+        reaper.ImGui_Text(ctx, "Configuration")
+        reaper.ImGui_PopFont(ctx)
+
+        -- Sum to Bus Checkbox
+        _, sumToBus = reaper.ImGui_Checkbox(ctx, "Sum to Bus", sumToBus)
+
+        -- Run Button
         if reaper.ImGui_Button(ctx, 'RUN') then
-            runStemExporter(includeMuted)
+            runStemExporter(includeMuted, sumToBus)  -- Pass updated values explicitly
         end
+
         reaper.ImGui_Dummy(ctx, 0, 10)  -- width = 0, height = 10 pixels
-
-
-
+        
+        -- Column 2 (Last export path and folder options)
+        reaper.ImGui_SameLine(ctx, columnWidth)  -- Move to the same line at columnWidth distance
+        
         -- Display the last export path with an editable text input field
         reaper.ImGui_Text(ctx, "Last Export Path:")
         local pathBuffer = lastExportFolder or ""
@@ -402,7 +423,6 @@ function loop()
             return info ~= nil
         end
 
-
         if lastExportFolder and lastExportFolder ~= "" and folderExists(lastExportFolder) then
             if reaper.ImGui_Button(ctx, "Open") then
                 openInExplorer(lastExportFolder)
@@ -414,11 +434,16 @@ function loop()
                 cleanUpStemFilenames(lastExportFolder)
             end
         end
-
+        
         reaper.ImGui_End(ctx)
     end
+
     reaper.defer(loop)
 end
+
+
+
+
 
 
 reaper.defer(loop)
