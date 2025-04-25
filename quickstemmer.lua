@@ -11,7 +11,7 @@ local safeSeparator = "__"
 function string.split(s, delimiter)
     local result = {}
     for match in (s..delimiter):gmatch("(.-)"..delimiter) do
-        table.insert(result, match)
+        table.insert(result, match) 
     end
     return result
 end
@@ -43,9 +43,10 @@ end
 
 -- Gets the directory of the current project
 local function getProjectDirectory()
-    local _, projPathWithName = reaper.EnumProjects(-1, "")
-    return projPathWithName:match("^(.*)[\\/][^\\/]-%.rpp$")
+    local proj = reaper.EnumProjects(-1, "")
+    return reaper.GetProjectPathEx(proj)
 end
+
 
 -- Finds the maximum end time across all media items
 local function getMaxEndTime()
@@ -121,6 +122,15 @@ function TrackStateManager:restore()
     end
 end
 
+function TrackStateManager:flattenHierarchy(trackCount)
+    for i = 0, trackCount - 1 do
+        local track = reaper.GetTrack(0, i)
+        self:save(track, { "I_FOLDERDEPTH" }) -- Save original
+        reaper.SetMediaTrackInfo_Value(track, "I_FOLDERDEPTH", 0) -- Flatten
+    end
+end
+
+
 function TrackStateManager.prepareTracks(self, trackCount, includeMuted, safeSeparator)
     reaper.ShowConsoleMsg("includeMuted (actual value): " .. tostring(includeMuted) .. "\n")
 
@@ -151,7 +161,7 @@ function TrackStateManager.prepareTracks(self, trackCount, includeMuted, safeSep
 
         if includeThisTrack and hasMediaItems(track) then
             reaper.SetTrackSelected(track, true)
-            self:save(track, { "B_MUTE", "P_NAME" })
+            self:save(track, { "B_MUTE", "P_NAME", "I_FOLDERDEPTH" })
             if isMuted == 1 then
                 reaper.SetMediaTrackInfo_Value(track, "B_MUTE", 0)
             end
@@ -335,6 +345,7 @@ local function runStemExporter(includeMuted)
 
     os.execute('mkdir "' .. stemsFolder .. '"')
 
+    TrackStateManager:flattenHierarchy(trackCount)
     renderStems(stemsFolder)
     TrackStateManager:restore()
 
